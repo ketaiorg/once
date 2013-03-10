@@ -4,6 +4,11 @@
  * once
  * 指定されたコマンドを指定された期間に一度だけ実行する
  * 
+ * オプション：
+ *  [-h]		ヘルプを表示する。
+ *  [-t 整数]	ここで指定された期間に一度だけコマンドを実行する。単位は秒。
+ *  [-s] 		サイレントモード。本当に実行された場合だけ結果を出力する。
+ * 
  * @package		once
  * @author		松井 健太郎 (Kentaro Matsui) <info@ke-tai.org>
  * @copyright	ke-tai.org
@@ -19,6 +24,8 @@ $once->run($argv);
  */
 class Once
 {
+	protected $usage = "Usage: once [-s] [-t INTERVALIC TIME] COMMAND [ARG]...\n";
+	protected $parameters = array('t:', 's', 'h');
 	protected $tmp_dir = '/tmp';
 	protected $tmp_prefix = 'once_';
 	protected $default_span_time = 3600;
@@ -47,7 +54,7 @@ class Once
 			$span_time = $this->default_span_time;
 
 			// オプションの解析
-			$opt_arr = getopt('t:s');
+			$opt_arr = getopt(implode('', $this->parameters));
 			if (isset($opt_arr['t']) and !is_array($opt_arr['t'])) {
 				$span_time = intval($opt_arr['t']);
 			}
@@ -57,6 +64,10 @@ class Once
 
 			// コマンドの取得
 			$command = $this->getCommand($argv);
+			if ('' == $command or isset($opt_arr['h'])) {
+				echo $this->usage;
+				exit(0);
+			}
 
 			// コマンドをキーにハッシュ文字列を生成し、ファイル名を決定
 			$file_name = $this->tmp_dir . '/' . $this->tmp_prefix . md5($command);
@@ -128,12 +139,13 @@ class Once
 				$continue_flg = false;
 				continue;
 			}
-			if ('-t' == $value) {
-				// -tオプションは次の引数も含めてスキップ
-				$continue_flg = true;
-				continue;
-			} elseif ('-' === substr($value, 0, 1)) {
-				// その他のオプションはスキップ
+			if ('-' === substr($value, 0, 1)) {
+				foreach ($this->parameters as $opt) {
+					if (':' === substr($opt, -1) and false != strpos($value, substr($opt, 0, 1))) {
+						// 引数を取るオプションは次の引数も含めてスキップ
+						$continue_flg = true;
+					}
+				}
 				continue;
 			} else {
 				$cmd_arr[] = $value;
