@@ -1,0 +1,221 @@
+#!/usr/bin/php
+<?php
+/**
+ * once
+ * 指定されたコマンドを指定された期間に一度だけ実行する
+ * 
+ * @package		once
+ * @author		松井 健太郎 (Kentaro Matsui) <info@ke-tai.org>
+ * @copyright	ke-tai.org
+ * @license		BSD
+ */
+
+$once = new Once();
+$once->run($argv);
+
+
+/**
+ * Onceクラス
+ */
+class Once
+{
+	protected $tmp_dir = '/tmp';
+	protected $tmp_prefix = 'once_';
+	protected $default_span_time = 3600;
+
+	/**
+	 * コンストラクタ
+	 * @param array $config 設定を格納した連想配列
+	 */
+	public function __construct($config = array())
+	{
+		// configで指定された設定でクラス変数を上書き
+		foreach ($config as $key => $val) {
+			$this->$key = $val;
+		}
+	}
+
+	/**
+	 * 実行
+	 * @param array $argv コマンドライン引数を格納した配列
+	 */
+	public function run($argv)
+	{
+		try {
+			// オプションのデフォルト値を設定
+			$silent_mode = false;
+			$span_time = $this->default_span_time;
+
+			// オプションの解析
+			$opt_arr = getopt('t:s');
+			if (isset($opt_arr['t']) and !is_array($opt_arr['t'])) {
+				$span_time = intval($opt_arr['t']);
+			}
+			if (isset($opt_arr['s'])) {
+				$silent_mode = true;
+			}
+
+			// コマンドの取得
+			$command = $this->getCommand($argv);
+
+			// コマンドをキーにハッシュ文字列を生成し、ファイル名を決定
+			$file_name = $this->tmp_dir . '/' . $this->tmp_prefix . md5($command);
+
+			// キャッシュファイルの読み取り
+			$read_data = $this->readTmpFile($file_name);
+
+			// 前回実行時間を取得して、実行するかどうかを判定
+			if (isset($read_data->time) and $read_data->time + $span_time > time()) {
+				// キャッシュを利用
+				$status = $read_data->status;
+				$stdout = $read_data->stdout;
+				$stderr = $read_data->stderr;
+			} else {
+				// コマンドの実行
+				$status = $this->execCommand($command, $stdout, $stderr);
+
+				// 実行結果の格納
+				$data = array(
+					'time' => time(),
+					'cmd' => $command,
+					'status' => $status,
+					'stdout' => $stdout,
+					'stderr' => $stderr,
+				);
+
+				// 今回の実行結果を記録
+				if (!$this->putTmpFile($file_name, json_encode($data))) {
+					throw new Exception('file output error.');
+				}
+
+				// サイレントモードに関わらずコマンドが実行された場合は出力
+				$silent_mode = false;
+			}
+
+			// 出力
+			if (false === $silent_mode) {
+				if (!empty($stdout)) {
+					echo implode('', $stdout);
+				}
+				if (!empty($stderr)) {
+					fputs(STDERR, implode('', $stderr));
+				}
+			}
+
+			// ステータスコードを出力して終了
+			exit($status);
+		} catch (Exception $e) {
+			// エラーの場合、標準エラーに出力して終了
+			fputs(STDERR, 'once: ' . $e->getMessage() . "\n");
+			exit(1);
+		}
+	}
+
+	/**
+	 * コマンド取得
+	 * @param array $argv コマンドライン引数を格納した配列
+	 * @return string コマンドライン文字列
+	 */
+	protected function getCommand($argv)
+	{
+		$cmd_arr = array();
+		$continue_flg = false;
+
+		// 実行したいコマンドを取得
+		$options = array_slice($argv, 1);
+		foreach ($options as $key => $value) {
+			if ($continue_flg) {
+				$continue_flg = false;
+				continue;
+			}
+			if ('-t' == $value) {
+				// -tオプションは次の引数も含めてスキップ
+				$continue_flg = true;
+				continue;
+			} elseif ('-' === substr($value, 0, 1)) {
+				// その他のオプションはスキップ
+				continue;
+			} else {
+				$cmd_arr[] = $value;
+			}
+		}
+
+		// 実行コマンドを決定
+		$cmd_str = implode(' ', $cmd_arr);
+
+		return $cmd_str;
+	}
+
+	/**
+	 * コマンド実行
+	 * @param string $command 実行するコマンド文字列
+	 * @param array &$stdout 標準出力を格納する変数
+	 * @param array &$stdin 標準エラー出力を格納する変数
+	 * @return int 実行ステータスコード
+	 */
+	protected function execCommand($command, &$stdout, &$stderr)
+	{
+		$descriptorspec = array(
+			1 => array('pipe', 'w'),
+			2 => array('pipe', 'w'),
+		);
+		$stdout = $stderr = array();
+		$process = proc_open($command, $descriptorspec, $pipes);
+
+		// STDOUT
+		while(!feof($pipes[1])) {
+			$stdout[] = fgets($pipes[1]);
+		}
+		fclose($pipes[1]);
+
+		// STDERR
+		while(!feof($pipes[2])) {
+			$stderr[] = fgets($pipes[2]);
+		}
+		fclose($pipes[2]);
+
+		return proc_close($process);
+	}
+
+	/**
+	 * テンポラリファイル内のデータを取得する
+	 * @param string $file_name テンポラリファイル名
+	 * @return class 読み込んだファイル内のデータを格納したJSONクラス
+	 */
+	protected function readTmpFile($file_name)
+	{
+		if (file_exists($file_name)) {
+			// 既にファイルがある場合
+			$ret_data = json_decode(file_get_contents($file_name));
+		} else {
+			// ファイルが無い場合
+			$ret_data = null;
+		}
+
+		return $ret_data;
+	}
+
+	/**
+	 * テンポラリファイルへのデータ出力
+	 * @param string $file_name テンポラリファイル名
+	 * @param string $data 出力データ
+	 * @return bool 成否
+	 */
+	protected function putTmpFile($file_name, $data)
+	{
+		// ファイルに出力
+		$fp = fopen($file_name, 'w');		// 書き込みモードでファイルをオープン
+		if ((empty($fp))) {
+			// 書き込みエラー
+			return false;
+		}
+
+		// データの書き出し
+		flock($fp, LOCK_EX);
+		fputs($fp, $data);
+		flock($fp, LOCK_UN);
+		fclose($fp);
+
+		return true;
+	}
+}
